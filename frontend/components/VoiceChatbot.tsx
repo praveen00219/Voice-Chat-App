@@ -11,7 +11,7 @@ interface Message {
   timestamp: Date;
 }
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "https://voice-chat-app-1oth.onrender.com";
 
 export default function VoiceChatbot() {
   const [isRecording, setIsRecording] = useState(false);
