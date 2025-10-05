@@ -19,7 +19,6 @@ from pydantic import BaseModel
 import uvicorn
 
 # Import speech and LLM libraries
-import speech_recognition as sr
 from gtts import gTTS
 from openai import OpenAI
 
@@ -97,22 +96,17 @@ class VoiceResponse(BaseModel):
 
 
 class SpeechToTextService:
-    """Service for converting speech to text using Google Speech Recognition"""
+    """Service for converting speech to text using OpenAI Whisper API"""
     
-    def __init__(self):
-        self.recognizer = sr.Recognizer()
-        # Adjust for ambient noise - Lower threshold for better sensitivity
-        self.recognizer.energy_threshold = 300  # Much lower threshold
-        self.recognizer.dynamic_energy_threshold = True
-        self.recognizer.pause_threshold = 0.8  # Wait less for pause
-        self.recognizer.phrase_threshold = 0.3  # Lower minimum phrase length
+    def __init__(self, whisper_client_instance=None):
+        self.whisper_client = whisper_client_instance
     
     def transcribe_audio(self, audio_file: bytes) -> str:
         """
-        Transcribe audio file to text using multiple methods
+        Transcribe audio file to text using OpenAI Whisper API
         
         Args:
-            audio_file: Audio file in bytes
+            audio_file: Audio file in bytes (WAV format)
             
         Returns:
             Transcribed text
@@ -123,58 +117,34 @@ class SpeechToTextService:
         try:
             logger.info(f"Attempting to transcribe audio, size: {len(audio_file)} bytes")
             
-            # Try OpenAI Whisper first (much more robust)
-            if whisper_client:
-                try:
-                    logger.info("Trying OpenAI Whisper API...")
-                    audio_buffer = BytesIO(audio_file)
-                    audio_buffer.name = "audio.wav"
-                    
-                    transcription = whisper_client.audio.transcriptions.create(
-                        model="whisper-1",
-                        file=audio_buffer,
-                        language="en"
-                    )
-                    
-                    text = transcription.text.strip()
-                    logger.info(f"Whisper transcription successful: {text[:100]}...")
-                    return text
-                    
-                except Exception as whisper_error:
-                    logger.warning(f"Whisper API failed: {whisper_error}, falling back to Google...")
+            if not self.whisper_client:
+                raise Exception("OpenAI API key not configured. Please add your OpenAI API key to use speech recognition.")
             
-            # Fallback to Google Speech Recognition
-            logger.info("Using Google Speech Recognition...")
+            # Use OpenAI Whisper API
+            logger.info("Using OpenAI Whisper API for transcription...")
             audio_buffer = BytesIO(audio_file)
+            audio_buffer.name = "audio.wav"
             
-            # Verify it's a valid audio file
-            try:
-                audio_data = sr.AudioFile(audio_buffer)
-            except Exception as file_error:
-                logger.error(f"Invalid audio file format: {file_error}")
-                raise Exception(f"Invalid audio file format. Please ensure audio is recording correctly.")
+            transcription = self.whisper_client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_buffer,
+                language="en",
+                response_format="text"
+            )
             
-            with audio_data as source:
-                logger.info(f"Audio source opened")
-                # Adjust for ambient noise
-                self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
-                audio = self.recognizer.record(source)
+            text = transcription.strip()
             
-            logger.info("Audio recorded from source, attempting Google recognition...")
+            if not text:
+                logger.error("Whisper returned empty transcription")
+                raise Exception("Could not understand the audio. Please speak clearly and ensure your microphone is working.")
             
-            # Use Google Speech Recognition (free)
-            text = self.recognizer.recognize_google(audio, language="en-US")
-            logger.info(f"Google transcription successful: {text[:100]}...")
+            logger.info(f"Whisper transcription successful: {text[:100]}...")
             return text
             
-        except sr.UnknownValueError:
-            logger.error("Speech recognition could not understand audio")
-            raise Exception("Could not understand the audio. Please speak more clearly and ensure you're close to the microphone. Try speaking louder.")
-        except sr.RequestError as e:
-            logger.error(f"Speech recognition service error: {e}")
-            raise Exception("Speech recognition service is unavailable. Please try again later.")
         except Exception as e:
             logger.error(f"Transcription error: {type(e).__name__}: {e}")
+            if "API key" in str(e).lower() or "authentication" in str(e).lower():
+                raise Exception("OpenAI API key is invalid or not configured. Please check your API key.")
             raise Exception(f"Failed to transcribe audio: {str(e)}")
 
 
@@ -288,7 +258,7 @@ class TextToSpeechService:
 
 
 # Initialize services
-stt_service = SpeechToTextService()
+stt_service = SpeechToTextService(whisper_client)
 llm_service = LLMService(openai_client)
 tts_service = TextToSpeechService()
 
@@ -332,19 +302,8 @@ async def test_audio(audio: UploadFile = File(...)):
             "content_type": audio.content_type,
             "size": len(audio_bytes),
             "first_bytes": audio_bytes[:44].hex() if len(audio_bytes) >= 44 else audio_bytes.hex(),
+            "whisper_available": whisper_client is not None
         }
-        
-        # Try to read as WAV
-        try:
-            audio_buffer = BytesIO(audio_bytes)
-            audio_data = sr.AudioFile(audio_buffer)
-            with audio_data as source:
-                info["wav_valid"] = True
-                info["sample_rate"] = source.SAMPLE_RATE if hasattr(source, 'SAMPLE_RATE') else "unknown"
-                info["sample_width"] = source.SAMPLE_WIDTH if hasattr(source, 'SAMPLE_WIDTH') else "unknown"
-        except Exception as e:
-            info["wav_valid"] = False
-            info["wav_error"] = str(e)
         
         return info
     except Exception as e:

@@ -5,18 +5,16 @@ fastapi==0.109.2
 uvicorn[standard]==0.27.1
 python-multipart==0.0.9
 
-# Speech Recognition (Google Speech API - free)
-SpeechRecognition==3.10.1
-
 # Text-to-Speech (Google TTS - free)
 gTTS==2.5.1
 
-# LLM Integration (OpenAI SDK - compatible with OpenAI and Groq)
+# OpenAI SDK for Whisper (speech-to-text) and GPT (LLM)
+# Also compatible with Groq for LLM
 openai>=2.0.0
 
 # Utilities
 python-dotenv==1.0.1
 aiofiles==23.2.1
 
-# Note: PyAudio and pydub are NOT required
-# Audio conversion is handled in the frontend using Web Audio API
+# Note: Removed SpeechRecognition (incompatible with Python 3.13)
+# Now using OpenAI Whisper API directly - much better quality!
