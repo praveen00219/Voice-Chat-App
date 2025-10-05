@@ -113,9 +113,35 @@ export default function VoiceChatbot() {
   const startRecording = async () => {
     try {
       setError(null);
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          channelCount: 1,
+          sampleRate: 16000,
+          sampleSize: 16,
+          echoCancellation: true,
+          noiseSuppression: true,
+        }
+      });
       
-      const mediaRecorder = new MediaRecorder(stream);
+      // Try to use audio/wav if supported, otherwise fall back to webm
+      let mimeType = "audio/webm";
+      const supportedTypes = [
+        "audio/wav",
+        "audio/webm",
+        "audio/webm;codecs=opus",
+        "audio/ogg;codecs=opus"
+      ];
+      
+      for (const type of supportedTypes) {
+        if (MediaRecorder.isTypeSupported(type)) {
+          mimeType = type;
+          break;
+        }
+      }
+      
+      console.log("Recording with MIME type:", mimeType);
+      
+      const mediaRecorder = new MediaRecorder(stream, { mimeType });
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
 
@@ -126,15 +152,21 @@ export default function VoiceChatbot() {
       };
 
       mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+        const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
+        
+        console.log("Audio recorded:", {
+          size: audioBlob.size,
+          type: audioBlob.type,
+        });
         
         // Convert to WAV format before sending
         try {
           const wavBlob = await convertToWav(audioBlob);
+          console.log("Converted to WAV:", wavBlob.size, "bytes");
           await sendAudioToBackend(wavBlob);
         } catch (conversionError) {
-          console.error("Audio conversion error, sending original:", conversionError);
-          await sendAudioToBackend(audioBlob);
+          console.error("Audio conversion failed:", conversionError);
+          setError("Failed to convert audio. Please try again or use a different browser.");
         }
         
         // Stop all tracks to release microphone
@@ -173,8 +205,13 @@ export default function VoiceChatbot() {
     setError(null);
 
     try {
+      console.log("Sending audio to backend:", {
+        size: audioBlob.size,
+        type: audioBlob.type,
+      });
+
       const formData = new FormData();
-      formData.append("audio", audioBlob, "recording.webm");
+      formData.append("audio", audioBlob, "recording.wav");
 
       const response = await axios.post(`${BACKEND_URL}/api/voice-chat`, formData, {
         headers: {
@@ -183,6 +220,7 @@ export default function VoiceChatbot() {
         responseType: "json",
       });
 
+      console.log("Backend response received");
       const { transcript, llm_response, audio_base64 } = response.data;
 
       // Add user message
@@ -211,7 +249,9 @@ export default function VoiceChatbot() {
     } catch (err) {
       console.error("Error processing audio:", err);
       if (axios.isAxiosError(err)) {
-        setError(err.response?.data?.detail || "Failed to process audio. Please try again.");
+        const errorDetail = err.response?.data?.detail || "Failed to process audio. Please try again.";
+        console.error("Backend error detail:", errorDetail);
+        setError(errorDetail);
       } else {
         setError("An unexpected error occurred. Please try again.");
       }

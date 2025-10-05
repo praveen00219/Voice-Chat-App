@@ -60,7 +60,16 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 # print("USE_GROQ :", USE_GROQ)
 # print("GROQ_API_KEY :", GROQ_API_KEY)
 
-# Initialize OpenAI client (can work with OpenAI or Groq)
+# Initialize OpenAI client for Whisper (speech-to-text)
+whisper_client = None
+if OPENAI_API_KEY:
+    try:
+        whisper_client = OpenAI(api_key=OPENAI_API_KEY)
+        logger.info("OpenAI Whisper client initialized")
+    except Exception as e:
+        logger.warning(f"Failed to initialize Whisper client: {e}")
+
+# Initialize LLM client (can work with OpenAI or Groq)
 openai_client = None
 try:
     if USE_GROQ and GROQ_API_KEY:
@@ -68,10 +77,10 @@ try:
             api_key=GROQ_API_KEY,
             base_url="https://api.groq.com/openai/v1"
         )
-        logger.info("Groq client initialized")
+        logger.info("Groq client initialized for LLM")
     elif OPENAI_API_KEY:
         openai_client = OpenAI(api_key=OPENAI_API_KEY)
-        logger.info("OpenAI client initialized")
+        logger.info("OpenAI client initialized for LLM")
     else:
         logger.warning("No API key provided. Using fallback LLM responses.")
 except Exception as e:
@@ -92,13 +101,15 @@ class SpeechToTextService:
     
     def __init__(self):
         self.recognizer = sr.Recognizer()
-        # Adjust for ambient noise
-        self.recognizer.energy_threshold = 4000
+        # Adjust for ambient noise - Lower threshold for better sensitivity
+        self.recognizer.energy_threshold = 300  # Much lower threshold
         self.recognizer.dynamic_energy_threshold = True
+        self.recognizer.pause_threshold = 0.8  # Wait less for pause
+        self.recognizer.phrase_threshold = 0.3  # Lower minimum phrase length
     
     def transcribe_audio(self, audio_file: bytes) -> str:
         """
-        Transcribe audio file to text
+        Transcribe audio file to text using multiple methods
         
         Args:
             audio_file: Audio file in bytes
@@ -110,27 +121,60 @@ class SpeechToTextService:
             Exception: If transcription fails
         """
         try:
-            # Process audio directly (expects WAV format from frontend)
-            audio_data = sr.AudioFile(BytesIO(audio_file))
+            logger.info(f"Attempting to transcribe audio, size: {len(audio_file)} bytes")
+            
+            # Try OpenAI Whisper first (much more robust)
+            if whisper_client:
+                try:
+                    logger.info("Trying OpenAI Whisper API...")
+                    audio_buffer = BytesIO(audio_file)
+                    audio_buffer.name = "audio.wav"
+                    
+                    transcription = whisper_client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=audio_buffer,
+                        language="en"
+                    )
+                    
+                    text = transcription.text.strip()
+                    logger.info(f"Whisper transcription successful: {text[:100]}...")
+                    return text
+                    
+                except Exception as whisper_error:
+                    logger.warning(f"Whisper API failed: {whisper_error}, falling back to Google...")
+            
+            # Fallback to Google Speech Recognition
+            logger.info("Using Google Speech Recognition...")
+            audio_buffer = BytesIO(audio_file)
+            
+            # Verify it's a valid audio file
+            try:
+                audio_data = sr.AudioFile(audio_buffer)
+            except Exception as file_error:
+                logger.error(f"Invalid audio file format: {file_error}")
+                raise Exception(f"Invalid audio file format. Please ensure audio is recording correctly.")
             
             with audio_data as source:
+                logger.info(f"Audio source opened")
                 # Adjust for ambient noise
                 self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
                 audio = self.recognizer.record(source)
             
+            logger.info("Audio recorded from source, attempting Google recognition...")
+            
             # Use Google Speech Recognition (free)
-            text = self.recognizer.recognize_google(audio)
-            logger.info(f"Transcription successful: {text[:50]}...")
+            text = self.recognizer.recognize_google(audio, language="en-US")
+            logger.info(f"Google transcription successful: {text[:100]}...")
             return text
             
         except sr.UnknownValueError:
-            logger.error("Could not understand audio")
-            raise Exception("Could not understand the audio. Please speak clearly.")
+            logger.error("Speech recognition could not understand audio")
+            raise Exception("Could not understand the audio. Please speak more clearly and ensure you're close to the microphone. Try speaking louder.")
         except sr.RequestError as e:
             logger.error(f"Speech recognition service error: {e}")
-            raise Exception("Speech recognition service is unavailable.")
+            raise Exception("Speech recognition service is unavailable. Please try again later.")
         except Exception as e:
-            logger.error(f"Transcription error: {e}")
+            logger.error(f"Transcription error: {type(e).__name__}: {e}")
             raise Exception(f"Failed to transcribe audio: {str(e)}")
 
 
@@ -274,6 +318,37 @@ async def health_check():
             "model": llm_service.model if openai_client else "fallback"
         }
     }
+
+
+@app.post("/api/test-audio")
+async def test_audio(audio: UploadFile = File(...)):
+    """Test endpoint to debug audio file issues"""
+    try:
+        audio_bytes = await audio.read()
+        
+        # Check file info
+        info = {
+            "filename": audio.filename,
+            "content_type": audio.content_type,
+            "size": len(audio_bytes),
+            "first_bytes": audio_bytes[:44].hex() if len(audio_bytes) >= 44 else audio_bytes.hex(),
+        }
+        
+        # Try to read as WAV
+        try:
+            audio_buffer = BytesIO(audio_bytes)
+            audio_data = sr.AudioFile(audio_buffer)
+            with audio_data as source:
+                info["wav_valid"] = True
+                info["sample_rate"] = source.SAMPLE_RATE if hasattr(source, 'SAMPLE_RATE') else "unknown"
+                info["sample_width"] = source.SAMPLE_WIDTH if hasattr(source, 'SAMPLE_WIDTH') else "unknown"
+        except Exception as e:
+            info["wav_valid"] = False
+            info["wav_error"] = str(e)
+        
+        return info
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.post("/api/voice-chat", response_model=VoiceResponse)
